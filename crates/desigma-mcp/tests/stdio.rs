@@ -16,7 +16,7 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         assert!(tools.iter().any(|t| t.name == "desigma_list_files"));
         let schema = tools.iter().find(|t| t.name == "desigma_delete_page").unwrap().input_schema.clone();
         assert_eq!(schema["properties"]["node_id"]["type"], "integer");
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         assert!(tools.iter().all(|t| t.annotations.is_some()));
         let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
         let doc = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
@@ -41,6 +41,57 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         let refused = client.call_tool(call("desigma_delete_page", json!({"node_id":page}))).await.unwrap();
         assert_eq!(refused.is_error, Some(true));
         assert!(refused.structured_content.unwrap()["error"].as_str().unwrap().contains("last page"));
+        client.cancel().await.unwrap();
+    })
+    .await
+    .expect("MCP subprocess must finish within 30 seconds");
+}
+
+/// Moving a layer keeps the document acyclic and is undoable (#32 follow-up).
+#[tokio::test]
+async fn moving_a_layer_reparents_it_and_refuses_cycles() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_desigma-mcp"));
+        command.arg("--workspace").arg(env!("CARGO_MANIFEST_DIR"));
+        command.env(desigma_mcp::live::ENV_FILE, "");
+        let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+        let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
+        let doc = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
+        let page = doc.structured_content.unwrap()["pages"][0]["node_id"].clone();
+        let frame =
+            client.call_tool(call("desigma_create_node", json!({"parent_id":page,"kind":"frame","name":"card","width":400,"height":200}))).await.unwrap();
+        let frame_id = frame.structured_content.unwrap()["node"]["id"].clone();
+        let rect = client
+            .call_tool(call("desigma_create_node", json!({"parent_id":page,"kind":"rectangle","name":"row","x":32.0,"y":48.0,"width":120,"height":40})))
+            .await
+            .unwrap();
+        let id = rect.structured_content.unwrap()["node"]["id"].clone();
+
+        let moved = client.call_tool(call("desigma_move_node", json!({"node_id":id,"parent_id":frame_id}))).await.unwrap();
+        assert_eq!(moved.is_error, Some(false), "{moved:?}");
+        assert_eq!(moved.structured_content.as_ref().unwrap()["changed"], true);
+        let node = client.call_tool(call("desigma_get_node", json!({"node_id":id}))).await.unwrap();
+        let node = node.structured_content.unwrap()["node"].clone();
+        assert_eq!(node["parent"], frame_id);
+        assert_eq!(node["transform"]["tx"], 32.0, "transform stays parent-relative");
+        let frame_node = client.call_tool(call("desigma_get_node", json!({"node_id":frame_id}))).await.unwrap();
+        assert_eq!(frame_node.structured_content.unwrap()["node"]["children"], json!([id]));
+
+        let same = client.call_tool(call("desigma_move_node", json!({"node_id":id,"parent_id":frame_id,"index":0}))).await.unwrap();
+        assert_eq!(same.structured_content.unwrap()["changed"], false, "no-op move reports no change");
+
+        let into_self = client.call_tool(call("desigma_move_node", json!({"node_id":id,"parent_id":id}))).await.unwrap();
+        assert_eq!(into_self.is_error, Some(true));
+        let into_leaf = client.call_tool(call("desigma_move_node", json!({"node_id":frame_id,"parent_id":id}))).await.unwrap();
+        assert_eq!(into_leaf.is_error, Some(true), "rectangles are not containers");
+        let page_root = client.call_tool(call("desigma_move_node", json!({"node_id":page,"parent_id":frame_id}))).await.unwrap();
+        assert_eq!(page_root.is_error, Some(true));
+        let missing = client.call_tool(call("desigma_move_node", json!({"node_id":999999,"parent_id":frame_id}))).await.unwrap();
+        assert_eq!(missing.is_error, Some(true));
+
+        client.call_tool(call("desigma_undo", json!({}))).await.unwrap();
+        let restored = client.call_tool(call("desigma_get_node", json!({"node_id":id}))).await.unwrap();
+        assert_eq!(restored.structured_content.unwrap()["node"]["parent"], page);
         client.cancel().await.unwrap();
     })
     .await
