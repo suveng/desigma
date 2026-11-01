@@ -22,11 +22,45 @@ struct Line<'a> {
 }
 
 pub(crate) fn convert_text(c: &mut Conv, t: &usvg::Text, parent: usize, a: Attrs) {
-    match collect(t) {
-        Some(lines) if !lines.is_empty() => emit(c, lines, parent, a),
-        // Text on a path, rotated glyphs, vertical text: keep the look as outlines.
-        _ => c.convert_group(t.flattened(), parent, a),
+    if let Some(lines) = collect(t).filter(|lines| !lines.is_empty()) {
+        emit(c, lines, parent, a);
+        return;
     }
+    let flat = t.flattened();
+    // No glyphs at all: the font family is not in usvg's database (it only
+    // carries the bundled Inter face), so nothing was laid out and the outlines
+    // are empty. Before this branch such text vanished from the document with no
+    // node and no pixels — a CJK-only SVG imported as a blank file. usvg has
+    // already resolved inheritance, CSS and every ancestor transform into the
+    // chunks, so they alone are enough to rebuild an editable Text node.
+    if flat.children().is_empty() {
+        let lines = unshaped_lines(t);
+        if !lines.is_empty() {
+            emit(c, lines, parent, a);
+            return;
+        }
+    }
+    // Otherwise text on a path, rotated glyphs, vertical text: keep the look as
+    // outlines.
+    c.convert_group(flat, parent, a);
+}
+
+/// Lines of a `<text>` whose glyphs usvg could not place, from the chunks alone.
+///
+/// The mirrors of [`collect`]'s checks are gone on purpose: there is no glyph
+/// list to walk, only the resolved `x`/`y`/`anchor` and the style spans.
+fn unshaped_lines(t: &usvg::Text) -> Vec<Line<'_>> {
+    let mut lines = Vec::new();
+    for ch in t.chunks() {
+        // Trailing blanks (e.g. indentation before `</text>`) are not content.
+        let text = ch.text().trim_end();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let spans = ch.spans().iter().filter(|s| s.is_visible() && s.start() < text.len()).map(|s| (s.start(), s.end().min(text.len()), s)).collect();
+        lines.push(Line { text: text.to_string(), x: ch.x().unwrap_or(0.0), baseline: ch.y().unwrap_or(0.0), anchor: ch.anchor(), anchor_x: ch.x(), spans });
+    }
+    lines
 }
 
 fn collect(t: &usvg::Text) -> Option<Vec<Line<'_>>> {
@@ -213,49 +247,5 @@ fn emit_node(c: &mut Conv, lines: &[Line], pitch: Option<f32>, parent: usize, a:
     node.size = Vec2::new(w, h);
     let label: String = content.lines().next().unwrap_or("").chars().take(40).collect();
     node.name = label.trim().to_string();
-    c.push(node, parent);
-}
-
-/// Build an editable Text node from the source attributes of a `<text>` that
-/// usvg could not shape (no glyph coverage). Mirrors [`emit_node`] without usvg
-/// geometry: the box comes from `desigma_render::text_geometry`.
-pub(crate) fn emit_raw(c: &mut Conv, raw: &crate::scan::RawText, parent: usize) {
-    let align = match raw.anchor.as_str() {
-        "middle" => TextAlignH::Center,
-        "end" => TextAlignH::Right,
-        _ => TextAlignH::Left,
-    };
-    let mut style = TextStyle {
-        font_family: raw.font_family.clone(),
-        font_weight: raw.font_weight,
-        font_size: raw.font_size,
-        align_h: align,
-        ..TextStyle::default()
-    };
-    if let Some(hex) = raw.fill.as_deref() {
-        if let Some(col) = Color::from_hex(hex) {
-            style.fills = vec![Paint::solid(col)];
-        }
-    }
-    let props = TextProps {
-        content: raw.content.clone(),
-        style,
-        auto_resize: TextAutoResize::WidthAndHeight,
-        ..Default::default()
-    };
-    let geom = desigma_render::text_geometry(&props, Vec2::ZERO);
-    let (w, h) = (geom.width, geom.height);
-    let first_baseline = geom.lines.first().map(|l| l.baseline).unwrap_or(h * 0.8);
-    let x = match align {
-        TextAlignH::Center => raw.x - w / 2.0,
-        TextAlignH::Right => raw.x - w,
-        _ => raw.x,
-    };
-    let y = raw.y - first_baseline;
-
-    let mut node = c.new_node(NodeKind::Text(props));
-    node.transform = Affine::translate(x, y);
-    node.size = Vec2::new(w, h);
-    node.name = raw.content.trim().chars().take(40).collect();
     c.push(node, parent);
 }
