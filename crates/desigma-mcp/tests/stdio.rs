@@ -16,7 +16,8 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         assert!(tools.iter().any(|t| t.name == "desigma_list_files"));
         let schema = tools.iter().find(|t| t.name == "desigma_delete_page").unwrap().input_schema.clone();
         assert_eq!(schema["properties"]["node_id"]["type"], "integer");
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 24);
         assert!(tools.iter().all(|t| t.annotations.is_some()));
         let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
         let doc = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
@@ -92,6 +93,49 @@ async fn moving_a_layer_reparents_it_and_refuses_cycles() {
         client.call_tool(call("desigma_undo", json!({}))).await.unwrap();
         let restored = client.call_tool(call("desigma_get_node", json!({"node_id":id}))).await.unwrap();
         assert_eq!(restored.structured_content.unwrap()["node"]["parent"], page);
+        client.cancel().await.unwrap();
+    })
+    .await
+    .expect("MCP subprocess must finish within 30 seconds");
+}
+
+/// New pages are appended to the document and can receive layers (#32 follow-up).
+#[tokio::test]
+async fn creating_a_page_appends_it_and_accepts_layers() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_desigma-mcp"));
+        command.arg("--workspace").arg(env!("CARGO_MANIFEST_DIR"));
+        command.env(desigma_mcp::live::ENV_FILE, "");
+        let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+        let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
+        let before = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
+        let before = before.structured_content.unwrap();
+        let pages_before = before["pages"].as_array().unwrap().len();
+
+        let created = client.call_tool(call("desigma_create_page", json!({"name":"Visitors","background":"#f5f7fb"}))).await.unwrap();
+        assert_eq!(created.is_error, Some(false), "{created:?}");
+        let page_id = created.structured_content.unwrap()["page_id"].clone();
+
+        let after = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
+        let after = after.structured_content.unwrap();
+        let pages = after["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), pages_before + 1);
+        assert_eq!(pages.last().unwrap()["node_id"], page_id);
+        assert_eq!(pages.last().unwrap()["name"], "Visitors");
+
+        let rect =
+            client.call_tool(call("desigma_create_node", json!({"parent_id":page_id,"kind":"rectangle","name":"card","width":120,"height":40}))).await.unwrap();
+        assert_eq!(rect.is_error, Some(false), "{rect:?}");
+
+        let blank = client.call_tool(call("desigma_create_page", json!({"name":"   "}))).await.unwrap();
+        assert_eq!(blank.is_error, Some(true), "blank names must be refused");
+        let bad_bg = client.call_tool(call("desigma_create_page", json!({"name":"x","background":"nope"}))).await.unwrap();
+        assert_eq!(bad_bg.is_error, Some(true));
+
+        client.call_tool(call("desigma_undo", json!({}))).await.unwrap();
+        client.call_tool(call("desigma_undo", json!({}))).await.unwrap();
+        let undone = client.call_tool(call("desigma_get_document", json!({}))).await.unwrap();
+        assert_eq!(undone.structured_content.unwrap()["pages"].as_array().unwrap().len(), pages_before);
         client.cancel().await.unwrap();
     })
     .await

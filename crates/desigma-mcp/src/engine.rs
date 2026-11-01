@@ -1,5 +1,5 @@
 //! Typed, local document operations shared by the MCP transport and future bridges.
-use desigma_doc::{Command, Document, History, Node, NodeId, NodeKind, Rect, TextStyle};
+use desigma_doc::{Color, Command, Document, History, Node, NodeId, NodeKind, Rect, TextStyle};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
@@ -148,6 +148,9 @@ pub fn call<H: Host>(host: &mut H, name: &str, args: Value) -> Result<Value, Str
         "desigma_move_node" => {
             let a: MoveNodeArgs = parse(args)?;
             move_node(host, a)
+        "desigma_create_page" => {
+            let a: CreatePageArgs = parse(args)?;
+            create_page(host, a)
         }
         "desigma_delete_node" => {
             let a: NodeArgs = parse(args)?;
@@ -397,6 +400,31 @@ fn move_node<H: Host>(host: &mut H, a: MoveNodeArgs) -> Result<Value, String> {
     }
     host.exec(Command::Reparent { id: NodeId(a.node_id), parent: NodeId(a.parent_id), index })?;
     Ok(json!({"node_id":a.node_id,"parent_id":a.parent_id,"index":index,"changed":true}))
+/// Append a new empty page and return it, ready to receive layers.
+///
+/// Pages live in `Document::pages`, not under another node, so this uses
+/// `Command::InsertPage` and stays undoable like every other edit.
+fn create_page<H: Host>(host: &mut H, a: CreatePageArgs) -> Result<Value, String> {
+    let name = a.name.trim();
+    if name.is_empty() {
+        return Err("name must not be empty".into());
+    }
+    bounded_text("name", name, 1024)?;
+    let background = match a.background.as_deref() {
+        Some(spec) => colour(spec, "background")?,
+        None => Color::from_hex("#ffffff").expect("white is a valid colour"),
+    };
+    let index = host.doc().pages.len();
+    // Allocate only after every argument has passed validation.
+    let id = host.alloc_id()?;
+    let mut page = Node::new(id, NodeKind::Page { background });
+    page.name = name.to_string();
+    host.exec(Command::InsertPage { index, nodes: vec![page] })?;
+    Ok(json!({"page_id":id,"index":index,"name":name,"changed":true}))
+}
+
+fn colour(spec: &str, field: &str) -> Result<Color, String> {
+    Color::from_hex(spec.trim()).ok_or_else(|| format!("invalid {field} colour: {spec} (use #RGB, #RRGGBB or #RRGGBBAA)"))
 }
 
 pub fn summary(n: &Node) -> Value {
@@ -484,6 +512,10 @@ struct MoveNodeArgs {
     parent_id: u64,
     /// Position among the new parent's children; appended when omitted.
     index: Option<usize>,
+struct CreatePageArgs {
+    name: String,
+    /// Page background; `#RRGGBB` (defaults to white).
+    background: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -550,6 +582,12 @@ pub fn tools() -> Vec<Value> {
         vec!["node_id","parent_id"],
         false,
         true,
+        "create_page",
+        "Append an empty page (background defaults to white) and return its id, ready to receive layers. Pages are not nested under another node, so this is separate from create_node. Supports undo; changes remain in memory until saved.",
+        json!({"name":{"type":"string","minLength":1,"maxLength":1024},"background":{"type":"string","maxLength":9,"description":"#RGB, #RRGGBB or #RRGGBBAA; defaults to #ffffff."}}),
+        vec!["name"],
+        false,
+        false,
     );
     add(
         "delete_node",
