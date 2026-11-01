@@ -1,7 +1,5 @@
 //! Typed, local document operations shared by the MCP transport and future bridges.
-use desigma_doc::{Color, Command, Document, History, Node, NodeId, NodeKind, Rect, TextStyle};
 use desigma_doc::{Color, Command, Document, History, LineHeight, Node, NodeId, NodeKind, Paint, Rect, TextAlignH, TextAlignV, TextStyle};
-use desigma_doc::{Command, Document, History, Node, NodeId, NodeKind, Rect, TextStyle};
 use desigma_svg::ImportOptions;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -156,12 +154,15 @@ pub fn call<H: Host>(host: &mut H, name: &str, args: Value) -> Result<Value, Str
             let id = n.id;
             host.exec(Command::Remove { id })?;
             Ok(json!({"page_id":id,"deleted":true}))
+        }
         "desigma_move_node" => {
             let a: MoveNodeArgs = parse(args)?;
             move_node(host, a)
+        }
         "desigma_create_page" => {
             let a: CreatePageArgs = parse(args)?;
             create_page(host, a)
+        }
         "desigma_set_appearance" => {
             let a: AppearanceArgs = parse(args)?;
             set_appearance(host, a)
@@ -419,6 +420,8 @@ fn move_node<H: Host>(host: &mut H, a: MoveNodeArgs) -> Result<Value, String> {
     }
     host.exec(Command::Reparent { id: NodeId(a.node_id), parent: NodeId(a.parent_id), index })?;
     Ok(json!({"node_id":a.node_id,"parent_id":a.parent_id,"index":index,"changed":true}))
+}
+
 /// Append a new empty page and return it, ready to receive layers.
 ///
 /// Pages live in `Document::pages`, not under another node, so this uses
@@ -442,8 +445,6 @@ fn create_page<H: Host>(host: &mut H, a: CreatePageArgs) -> Result<Value, String
     Ok(json!({"page_id":id,"index":index,"name":name,"changed":true}))
 }
 
-fn colour(spec: &str, field: &str) -> Result<Color, String> {
-    Color::from_hex(spec.trim()).ok_or_else(|| format!("invalid {field} colour: {spec} (use #RGB, #RRGGBB or #RRGGBBAA)"))
 /// Restyle a layer's fill, stroke, corner radius and opacity.
 ///
 /// A text layer keeps its colour in `TextStyle::fills`, so a `fill` on a text node is
@@ -671,10 +672,18 @@ struct MoveNodeArgs {
     parent_id: u64,
     /// Position among the new parent's children; appended when omitted.
     index: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreatePageArgs {
     name: String,
     /// Page background; `#RRGGBB` (defaults to white).
     background: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AppearanceArgs {
     node_id: u64,
     /// `#RGB`, `#RRGGBB`, `#RRGGBBAA` or `none` to clear.
@@ -838,12 +847,16 @@ pub fn tools() -> Vec<Value> {
         vec!["node_id","parent_id"],
         false,
         true,
+    );
+    add(
         "create_page",
         "Append an empty page (background defaults to white) and return its id, ready to receive layers. Pages are not nested under another node, so this is separate from create_node. Supports undo; changes remain in memory until saved.",
         json!({"name":{"type":"string","minLength":1,"maxLength":1024},"background":{"type":"string","maxLength":9,"description":"#RGB, #RRGGBB or #RRGGBBAA; defaults to #ffffff."}}),
         vec!["name"],
         false,
         false,
+    );
+    add(
         "set_appearance",
         "Restyle one non-page layer: fill, stroke, stroke width, corner radius, opacity. Colours accept #RGB, #RRGGBB, #RRGGBBAA or none. On text layers fill sets the text colour. Supports undo; changes remain in memory until saved.",
         json!({"node_id":id,"fill":{"type":"string","maxLength":9},"stroke":{"type":"string","maxLength":9},"stroke_width":{"type":"number","minimum":0,"maximum":1000},"corner_radius":{"type":"number","minimum":0,"maximum":1000000},"opacity":{"type":"number","minimum":0,"maximum":1}}),
