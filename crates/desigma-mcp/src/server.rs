@@ -259,6 +259,8 @@ impl Session {
                         | "desigma_create_page"
                         | "desigma_update_node"
                         | "desigma_move_node"
+                        | "desigma_set_appearance"
+                        | "desigma_set_text_style"
                         | "desigma_delete_node"
                         | "desigma_delete_page"
                         | "desigma_undo"
